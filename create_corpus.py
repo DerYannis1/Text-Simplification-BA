@@ -17,15 +17,17 @@
 
 import argparse
 import json
+from numpy.random import choice
+from jsonl import jsonl
 import re
 import time
-import unicodedata
 from pathlib import Path
 from urllib.parse import quote, unquote
 import requests
 import wikipediaapi
 from bs4 import BeautifulSoup
 from tqdm import tqdm
+import unicodedata
 
 
 
@@ -33,8 +35,8 @@ WIKI_API = "https://de.wikipedia.org/w/api.php"
 KLEX_API = "https://klexikon.zum.de/api.php"
 MINIKLEX_API = "https://miniklexikon.zum.de/api.php"
 
-USER_AGENT = "TextSimplificationDatasetBuilder (Uni Bachelor Thesis)"
-
+#https://www.mediawiki.org/wiki/API:Etiquette user agent according to the api etiquette format
+USER_AGENT = "TextSimplificationDatasetBuilder/v1.0 (https://github.com/DerYannis1/Text-Simplification-BA/, yannis.hildebrand@st.ovgu.de) "
 REQUEST_SLEEP_TIME = 0.3 
 
 # HTML elements to avoid
@@ -60,12 +62,11 @@ def api_get(url, params, retries=2):
 
     for i in range(retries):
         try:
-            r = session.get(url, params=params, timeout=20)
-            r.raise_for_status()
+            request = session.get(url, params=params, timeout=20)
+            request.raise_for_status()
             time.sleep(REQUEST_SLEEP_TIME)
-            return r.json()
+            return request.json()
         except (requests.RequestException, ValueError) as e:
-            err = e
             wait = 2.0 * (i + 1)
             print(f"{url} failed ({e}), retry in {wait}seconds")
             time.sleep(wait)
@@ -133,7 +134,7 @@ def find_klexikon_link(mini_html):
 
 
 def is_may_refer_page(api_url, title):
-    # May reference sites e.g.: ("Adler", "Aal", ...) are unwanted
+    # May refer sites e.g.: ("Adler", "Aal", ...) are unwanted
     params = {
         "action": "query",
         "titles": title,
@@ -142,7 +143,7 @@ def is_may_refer_page(api_url, title):
     }
     data = api_get(api_url, params)
     for page in data.get("query", {}).get("pages", {}).values():
-        if "may refer" in page.get("pageprops", {}):
+        if "disambiguation" in page.get("pageprops", {}):
             return True
     return False
 
@@ -199,7 +200,7 @@ def get_lead_paragraphs(html):
             if txt:
                 paras.append(txt)
 
-    return clean_text("\n\n".join(paras))
+    return clean_text("\n".join(paras))
 
 
 def get_full_text(html):
@@ -214,7 +215,7 @@ def get_full_text(html):
     paras = [p.get_text(" ", strip=True) for p in content.find_all("p")]
     paras = [p for p in paras if p]
 
-    return clean_text("\n\n".join(paras))
+    return clean_text("\n".join(paras))
 
 
 def clean_text(txt):
@@ -231,8 +232,12 @@ def make_wiki_url(root, title):
 
 def build_dataset(out_dir="dataset", limit=None, overwrite=False, min_words=5):
     out_dir = Path(out_dir)
-    topics_dir = out_dir / "topics"
-    topics_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path_train = out_dir /"train.jsonl"
+    out_path_test = out_dir / "test.jsonl"
+    out_path_validation = out_dir / "validation.jsonl"
+
+    out_path_info = out_dir / "info.json"
 
     print("Retrieve MiniKlexikon articles...")
     mini_titles = get_all_titles(MINIKLEX_API)
@@ -247,7 +252,6 @@ def build_dataset(out_dir="dataset", limit=None, overwrite=False, min_words=5):
 
     klex_lookup = {t.strip().lower(): t for t in klex_titles}
 
-    manifest = []
     stats = {
         "written": 0,
         "skip_exists": 0,
@@ -256,13 +260,15 @@ def build_dataset(out_dir="dataset", limit=None, overwrite=False, min_words=5):
         "skip_no_wiki": 0,
     }
 
-    for mini_title in tqdm(mini_titles, desc="Verarbeite Themen"):
-        safe_name = re.sub(r"[^\w\-]", "_", mini_title)[:80]
-        if not safe_name:
-            safe_name = "untitled"
-        out_path = topics_dir / (safe_name + ".json")
+    existing_topics = []
+    if out_path_info.exists():
+        with open(out_path_info, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            existing_topics = [t["topic"] for t in data.get("topic", [])]
 
-        if out_path.exists() and not overwrite:
+    for mini_title in tqdm(mini_titles, desc="Verarbeite Themen"):
+        
+        if mini_title in existing_topics:
             stats["skip_exists"] += 1
             continue
 
@@ -285,10 +291,9 @@ def build_dataset(out_dir="dataset", limit=None, overwrite=False, min_words=5):
             stats["skip_empty"] += 1
             continue
 
-        klex_entry = {
+        klex_info = {
             "title": klex_title,
             "url": make_wiki_url("https://klexikon.zum.de", klex_title),
-            "lead_text": klex_lead,
             "n_tokens": len(klex_lead.split()),
         }
 
@@ -305,35 +310,52 @@ def build_dataset(out_dir="dataset", limit=None, overwrite=False, min_words=5):
             stats["skip_empty"] += 1
             continue
 
-        entry = {
+        info_entry = {
             "topic": mini_title,
             "wikipedia": {
                 "title": wiki_title,
                 "url": wiki_url,
-                "lead_text": wiki_lead,
                 "n_tokens": len(wiki_lead.split()),
             },
-            "klexikon": klex_entry,
+            "klexikon": klex_info,
             "miniklexikon": {
                 "title": mini_title,
                 "url": make_wiki_url("https://miniklexikon.zum.de", mini_title),
-                "full_text": mini_full,
                 "n_tokens": len(mini_full.split()),
             },
         }
+        if out_path_info.exists():
+            with open(out_path_info, "r+", encoding="utf-8") as f:
+                data = json.load(f)
+                data["topic"].append(info_entry)
+                f.seek(0)
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        else:
+            with open(out_path_info, "w", encoding="utf-8") as f:
+                json.dump({"topic": [info_entry]}, f, ensure_ascii=False, indent=2)
 
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(entry, f, ensure_ascii=False, indent=2)
+        # write train/test/validation files randomized
+        train_odds = 0.7
+        test_odds = 0.15
+        validation_odds = 0.15
 
-        manifest.append({"topic": mini_title, "file": str(out_path)})
+        out_path_data = choice(
+            [out_path_train, out_path_test, out_path_validation],
+            p=[train_odds, test_odds, validation_odds]
+        )
+
+        if not out_path_data.exists():
+            miniklexikon_json = {"id": mini_title, "source": wiki_lead, "target": mini_full, "level": "MiniKlexikon"}
+            jsonl.dump([miniklexikon_json], out_path_data)
+            klexikon_json = {"id": mini_title, "source": wiki_lead, "target": klex_lead, "level": "Klexikon"}
+            jsonl.append(klexikon_json, out_path_data)
+        else:
+            miniklexikon_json = {"id": mini_title, "source": wiki_lead, "target": mini_full, "level": "MiniKlexikon"}
+            jsonl.append(miniklexikon_json, out_path_data)
+            klexikon_json = {"id": mini_title, "source": wiki_lead, "target": klex_lead, "level": "Klexikon"}
+            jsonl.append(klexikon_json, out_path_data)
+
         stats["written"] += 1
-
-    # keep manifest to avoid loosing old entries when using --overwrite on a subset
-    manifest_path = out_dir / "manifest.jsonl"
-    mode = "a" if manifest_path.exists() else "w"
-    with open(manifest_path, mode, encoding="utf-8") as f:
-        for row in manifest:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     print("\nDone.")
     print(f"  added:          {stats['written']}")
@@ -341,8 +363,7 @@ def build_dataset(out_dir="dataset", limit=None, overwrite=False, min_words=5):
     print(f"  skipped (too short):   {stats['skip_empty']}")
     print(f"  skipped (no Klex): {stats['skip_no_klex']}")
     print(f"  skipped (no Wiki): {stats['skip_no_wiki']}")
-    print(f"  Output directory: {topics_dir.resolve()}")
-    print(f"  Manifest: {manifest_path.resolve()}")
+    print(f"  Output directory: {out_dir.resolve()}")
 
 
 if __name__ == "__main__":
