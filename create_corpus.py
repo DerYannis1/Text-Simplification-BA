@@ -335,14 +335,15 @@ def build_dataset(out_dir="dataset", limit=None, overwrite=False, min_words=5):
                 json.dump({"topic": [info_entry]}, f, ensure_ascii=False, indent=2)
 
         # write train/test/validation files randomized
-        train_odds = 0.7
-        test_odds = 0.15
-        validation_odds = 0.15
+        # train_odds = 0.7
+        # test_odds = 0.15
+        # validation_odds = 0.15
 
-        out_path_data = choice(
-            [out_path_train, out_path_test, out_path_validation],
-            p=[train_odds, test_odds, validation_odds]
-        )
+        # out_path_data = choice(
+        #     [out_path_train, out_path_test, out_path_validation],
+        #     p=[train_odds, test_odds, validation_odds]
+        # )
+        out_path_data = out_dir /"all.jsonl"
 
         if not out_path_data.exists():
             miniklexikon_json = {"id": mini_title, "source": wiki_lead, "target": mini_full, "level": "MiniKlexikon"}
