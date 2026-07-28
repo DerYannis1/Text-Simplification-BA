@@ -7,7 +7,7 @@ Benötigte Schritte beim Fine Tuning:
 4- Preprocessing, um passende Steuer-Token vor den Quelltext zu hängen
 5. LoRA-Config mit modules_to_save für die Embedding-Layer
 6. Trainings-Argumente festlegen und Training starten über Seq2SeqTrainer
-7. Speichern & Inferenz mit wählbarem Ziel-Niveau
+7. Speichern
 
 """
 
@@ -229,7 +229,7 @@ trainer = Seq2SeqTrainer(
     model=model,
     args=training_args,
     train_dataset=tokenized_dataset["train"],
-    eval_dataset=["validation"]
+    eval_dataset=["validation"],
     data_collator=data_collator,
     processing_class=tokenizer,
     compute_metrics=compute_metrics
@@ -239,5 +239,8 @@ trainer = Seq2SeqTrainer(
 model.generation_config.forced_bos_token_id = tokenizer.lang_code_to_id["de_DE"] #forced_bos_token_id (int, optional, defaults to model.config.forced_bos_token_id) — The id of the token to force as the first generated token after the decoder_start_token_id. Useful for multilingual models like mBART where the first generated token needs to be the target language token.
 #trainer.train()
 
-
-#Step 7 Speichern und INferenz mit wählbarem Ziel Niveau
+#7
+output_dir = "./mbart-tuned-final"
+trainer.save_model(output_dir)
+tokenizer.save_pretrained(output_dir)
+model.save_pretrained(output_dir, save_embedding_layers=True)
