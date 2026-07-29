@@ -8,12 +8,25 @@ from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from sentence_transformers import util
 import jsonl
+import random
+import re
 
 
 SIMILARITY_THRESHOLD = 25
 DATASET_PATH = "./dataset/all.jsonl"
 OUTPUT_CSV_PATH = "./dataset"
 MODEL_NAME = "BAAI/bge-m3"
+MINIKLEXIKON_FOOTER = re.compile(
+    r"\s*Mehr über .*? findest du auch im Kinder-Lexikon Klexikon und bei der Such-Maschine Frag Finn\s*\.\s*$",
+    re.IGNORECASE
+)
+
+def clean_target(text: str) -> str:
+    text = MINIKLEXIKON_FOOTER.sub("", text)
+    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+-\s+", "-", text)
+    return text.strip()
 
 def load_entries(file_path):
     entries = []
@@ -26,6 +39,8 @@ def load_entries(file_path):
             missing = {"id", "source", "target", "level"} - obj.keys()
             if missing:
                 continue
+
+            obj["target"] = clean_target(obj["target"])
             entries.append(obj)
     return entries
 
@@ -109,7 +124,7 @@ def write_to_csv(results, out_path):
             writer.writerow(r)
     print("written to csv file")
 
-def update_training_files(csv_path, file_path):
+def update_training_files(csv_path, entries):
     valid_ids = set()
     similarities = {}
 
@@ -126,17 +141,41 @@ def update_training_files(csv_path, file_path):
             similarities[topic_id].append(similarity)
     #only if both levels have high similarity
     for topic_id, values in similarities.items():
-        if all(value >= 0.8 for value in values):
+        if all(value >= 0.75 for value in values):
             valid_ids.add(topic_id)
 
-    with open(file_path, "r", encoding="utf-8") as reader, \
-            open("filtered.jsonl", "w", encoding="utf-8") as writer:
+    entries_by_id = {}
+    for obj in entries:
+        topic_id = obj.get("id")
+        if topic_id in valid_ids:
+            entries_by_id.setdefault(topic_id, []).append(obj)
 
-            for line in reader:
-                obj = json.loads(line)
+    ids = list(entries_by_id.keys())
+    random.seed(42)
+    random.shuffle(ids)
 
-                if obj.get("id") in valid_ids:
-                    writer.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    n = len(ids)
+    n_train = int(n * 0.8)
+    n_val = int(n * 0.1)
+
+    train_ids = set(ids[:n_train])
+    val_ids = set(ids[n_train:n_train + n_val])
+    test_ids = set(ids[n_train + n_val:])
+
+    with open(Path(OUTPUT_CSV_PATH + "/training.jsonl"), "w", encoding="utf-8") as train_f, \
+         open(Path(OUTPUT_CSV_PATH + "/validation.jsonl"), "w", encoding="utf-8") as val_f, \
+         open(Path(OUTPUT_CSV_PATH + "/test.jsonl"), "w", encoding="utf-8") as test_f:
+
+        for topic_id, entries in entries_by_id.items():
+            if topic_id in train_ids:
+                target_f = train_f
+            elif topic_id in val_ids:
+                target_f = val_f
+            else:
+                target_f = test_f
+
+            for entry in entries:
+                target_f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 def main():
     file_path = Path(DATASET_PATH)
@@ -153,12 +192,10 @@ def main():
 
     model = SentenceTransformer(MODEL_NAME)
     results = compute_source_target_similarity(entries, model)
-    
     write_to_csv(catch_bad_pairs(results, threshold), output_src_tar_path)
+    update_training_files(output_src_tar_path, entries)
 
-#    update_training_files(output_src_tar_path, file_path)
 
-    
 
 if __name__ == "__main__":
     main()
