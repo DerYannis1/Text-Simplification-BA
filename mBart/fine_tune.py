@@ -12,9 +12,13 @@ Benötigte Schritte beim Fine Tuning:
 """
 
 from datasets import load_dataset
+import tensorboard
+import os
+
+os.environ["TENSORBOARD_LOGGING_DIR"] = "/remote/code/Text-Simplification-BA/logs"
 
 dataset = load_dataset("json", data_files={
-    "train": "./dataset/train.jsonl",
+    "train": "./dataset/training.jsonl",
     "validation": "./dataset/validation.jsonl",
     "test": "./dataset/test.jsonl",
 })
@@ -67,7 +71,7 @@ with torch.no_grad():
 # 4:
 
 MAX_INPUT_LENGTH = 1024
-MAX_TARGET_LENGTH = 1024
+MAX_TARGET_LENGTH = 768
 
 tokenizer.src_lang = "de_DE"
 tokenizer.tgt_lang = "de_DE"
@@ -173,7 +177,7 @@ from transformers import (
 data_collator = DataCollatorForSeq2Seq(
     tokenizer=tokenizer,
     model=model,
-    label_pad_token_id=100,
+    label_pad_token_id=-100,
     padding=True
 )
 
@@ -182,7 +186,8 @@ rouge = evaluate.load("rouge")
 def compute_metrics(eval_preds):
     preds, labels = eval_preds
 
-    labels = np.where(label != -100, labels, tokenizer.pad_token_id)
+    preds = np.where(preds != -100, preds, tokenizer.pad_token_id)
+    labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
 
     decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
     decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
@@ -213,23 +218,26 @@ training_args = Seq2SeqTrainingArguments(
 
     learning_rate=1e-3,
     per_device_train_batch_size=8,
-    per_device_eval_batch_size=8,
+    per_device_eval_batch_size=4,
     gradient_accumulation_steps=2,
     num_train_epochs=10,
 
     predict_with_generate=True,
     generation_max_length=MAX_TARGET_LENGTH,
 
-    fp16=True, 
-    logging_steps=50,
-    report_to="none"
+    fp16=True,
+
+    logging_dir="./logs",
+    logging_strategy="steps",
+    logging_steps=10,
+    report_to=["tensorboard"],
 )
 
 trainer = Seq2SeqTrainer(
     model=model,
     args=training_args,
     train_dataset=tokenized_dataset["train"],
-    eval_dataset=["validation"],
+    eval_dataset=tokenized_dataset["validation"],
     data_collator=data_collator,
     processing_class=tokenizer,
     compute_metrics=compute_metrics
@@ -237,7 +245,7 @@ trainer = Seq2SeqTrainer(
 
 
 model.generation_config.forced_bos_token_id = tokenizer.lang_code_to_id["de_DE"] #forced_bos_token_id (int, optional, defaults to model.config.forced_bos_token_id) — The id of the token to force as the first generated token after the decoder_start_token_id. Useful for multilingual models like mBART where the first generated token needs to be the target language token.
-#trainer.train()
+trainer.train()
 
 #7
 output_dir = "./mbart-tuned-final"
