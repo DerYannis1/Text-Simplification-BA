@@ -18,7 +18,7 @@
 import argparse
 import json
 from numpy.random import choice
-from jsonl import jsonl
+import jsonl
 import re
 import time
 from pathlib import Path
