@@ -5,11 +5,10 @@ import requests
 import textstat
 import spacy
 import torch
-from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
-from peft import PeftModel
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-BASE_CHECKPOINT = "facebook/mbart-large-50"
-ADAPTER_PATH = "./mbart-tuned-final_rouge"
+MODEL_DIR = "./mt5-simplify-de"
+
 AOA_FILE = "./lexical_ressources/Age_Of_Acquisition.csv"
 FREQ_FILE = "./lexical_ressources/grundwortschatz.csv"
 SPACY_MODEL = "de_core_news_md"
@@ -22,39 +21,41 @@ FREQ_THRESHOLD = 5.0
 #2-->9-11
 #3-->11-14
 AGE_GROUPS = {
-    "1": {                  
-        "mbart_level": "MINIKLEXIKON",
+    "1": {
+        "control_level": "MINIKLEXIKON",
         "aoa_threshold": 7.0,
         "wstf_threshold": 6.0,
         "lix_threshold": 30.0,
     },
     "2": {
-        "mbart_level": "KLEXIKON",
+        "control_level": "KLEXIKON",
         "aoa_threshold": 9.0,
         "wstf_threshold": 8.0,
         "lix_threshold": 40.0,
     },
     "3": {
-        "mbart_level": "KLEXIKON",
+        "control_level": "KLEXIKON",
         "aoa_threshold": 12.0,
         "wstf_threshold": 10.0,
         "lix_threshold": 50.0,
     },
 }
 
+GENERATION_MAX_NEW_TOKENS = 512
+GENERATION_MIN_LENGTH = 32
+GENERATION_NUM_BEAMS = 4
+GENERATION_NO_REPEAT_NGRAM_SIZE = 3
+GENERATION_REPETITION_PENALTY = 1.3
+MAX_SOURCE_LENGTH = 1024
+
 textstat.set_lang("de")
 
 
 class SimplificationPipeline:
     def __init__(self):
-        
         #subprocess.run(["ollama", "stop", OLLAMA_MODEL], check=False, timeout=30)
-        
-        self.tokenizer = MBart50TokenizerFast.from_pretrained(ADAPTER_PATH)
-        base_model = MBartForConditionalGeneration.from_pretrained(BASE_CHECKPOINT)
-        base_model.resize_token_embeddings(len(self.tokenizer), pad_to_multiple_of=8)
-        base_model.generation_config.forced_bos_token_id = self.tokenizer.lang_code_to_id["de_DE"]
-        self.model = PeftModel.from_pretrained(base_model, ADAPTER_PATH)
+        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_DIR)
         self.model.eval()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model.to(self.device)
@@ -75,14 +76,20 @@ class SimplificationPipeline:
             lookup[str(row[word_col]).strip().lower()] = float(row[value_col])
         return lookup
 
-    def mbart_simplify(self, text, mbart_level, max_new_tokens=512):
-        input_text = f"<{mbart_level.upper()}> {text}"
-        self.tokenizer.src_lang = "de_DE"
-        inputs = self.tokenizer(input_text, return_tensors="pt", max_length=1024, truncation=True).to(self.device)
+    def simplify(self, text, control_level, max_new_tokens=GENERATION_MAX_NEW_TOKENS):
+
+        input_text = f"vereinfache <{control_level.upper()}>: {text}"
+        inputs = self.tokenizer(
+            input_text, return_tensors="pt", max_length=MAX_SOURCE_LENGTH, truncation=True
+        ).to(self.device)
         with torch.no_grad():
             output_ids = self.model.generate(
-                **inputs, max_new_tokens=max_new_tokens, num_beams=4,
-                forced_bos_token_id=self.tokenizer.lang_code_to_id["de_DE"], no_repeat_ngram_size=3,
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                min_length=GENERATION_MIN_LENGTH,
+                num_beams=GENERATION_NUM_BEAMS,
+                no_repeat_ngram_size=GENERATION_NO_REPEAT_NGRAM_SIZE,
+                repetition_penalty=GENERATION_REPETITION_PENALTY,
             )
         return self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
@@ -174,8 +181,8 @@ class SimplificationPipeline:
         age_specs = AGE_GROUPS[age_group]
         steps = []
 
-        simplified = self.mbart_simplify(source_text, mbart_level=age_specs["mbart_level"])
-        steps.append({"step": "1", "name": "mbart_simplification", "input": source_text, "output": simplified})
+        simplified = self.simplify(source_text, control_level=age_specs["control_level"])
+        steps.append({"step": "1", "name": "mt5_simplification", "input": source_text, "output": simplified})
 
         content_fixed = self.fix_hallucination(source_text, simplified)
         steps.append({"step": "2", "name": "fix_hallucination", "input": simplified, "raw_llm_response": content_fixed})
@@ -200,7 +207,7 @@ class SimplificationPipeline:
 
         return {
             "source": source_text, "age_group": age_group, "final_text": final_text,
-            "mbart_simplification": simplified,
+            "mt5_simplification": simplified,
             "content_fixed": content_fixed,
             "flagged_words": flagged_words, "readability": readability,
             "final_flagged_words": final_flagged_words, "final_readability": final_readability,
