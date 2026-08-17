@@ -7,8 +7,10 @@ import textstat
 import spacy
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from difflib import SequenceMatcher
 
-MODEL_DIR = "./mt5-simplify-de"
+#MODEL_DIR = "./mt5-simplify-de"
+MODEL_DIR = "./mt5-sweep/run03_lr0.0003_nte30_lsf0.1"
 
 AOA_FILE = "./lexical_ressources/GPT_estimates_AoA.xlsx" # Korrelation von 0.96 zu den alten Werten
 #AOA_FILE = "./lexical_ressources/Age_Of_Acquisition.csv"
@@ -26,7 +28,7 @@ FREQ_THRESHOLD = 5.0
 AGE_GROUPS = {
     "1": {
         "control_level": "MINIKLEXIKON",
-        "aoa_threshold": 7.5,
+        "aoa_threshold": 7.0,
         "wstf_threshold": 5.0,
         "lix_threshold": 35.0,
     },
@@ -46,9 +48,9 @@ AGE_GROUPS = {
 
 GENERATION_MAX_NEW_TOKENS = 512
 GENERATION_MIN_LENGTH = 32
-GENERATION_NUM_BEAMS = 4
+GENERATION_NUM_BEAMS = 6
 GENERATION_NO_REPEAT_NGRAM_SIZE = 3
-GENERATION_REPETITION_PENALTY = 1.3
+GENERATION_REPETITION_PENALTY = 1.15
 MAX_SOURCE_LENGTH = 1024  # muss zu --max-source-length aus train_mt5.py passen
 
 textstat.set_lang("de")
@@ -152,65 +154,109 @@ class SimplificationPipeline:
             "lix_too_high": bool(lix > lix_threshold),
         }
 
+    def may_be_reference(self, output, reference, input_text, unwanted_similarity=0.75):
+        reference_sim = SequenceMatcher(None, output.lower(), reference.lower()).ratio()
+        len_output_input = len(output.split()) / max(len(input_text.split()), 1)
+        return reference_sim > unwanted_similarity or len_output_input > 1.5
 
     def fix_words(self, input_text, flagged_words):
-        #schwere Wörter mit geeigneten synonymen ersetzen oder erklären
-        prompt = f"""Du bekommst einen EINFACH GESCHRIEBENEN Text (kurze Sätze, einfache Wörter) und eine Liste von Wörtern, die durch einfachere Synonyme ersetzt werden sollen.
+        prompt = f"""
+        Du bekommst:
+        - einen einfach geschriebenen Text (kurze Sätze, einfache Wörter) 
+        - eine Liste von Wörtern, die durch einfachere Synonyme ersetzt werden sollen.
 
-**Deine einzige Aufgabe:** Ersetze GENAU die Wörter aus der Liste durch ein einfacheres, kürzeres, allgemein bekanntes Synonym -- Wort für Wort, an derselben Stelle im Satz.
+        **Deine einzige Aufgabe:** Ersetze genau die Wörter aus der Liste durch ein einfacheres, allgemein bekanntes und passendes Synonym. Wort für Wort, an derselben Stelle im Satz.
 
-**Was du NICHT tun darfst:**
-- Kein anderes Wort verändern, auch wenn es dir kompliziert erscheint -- nur die Wörter aus der Liste.
-- Keine Sätze umformulieren, umstellen, kürzen oder verlängern.
-- Keine Erklärungen, Definitionen oder Nebensätze einfügen (z. B. NICHT "das bedeutet ..." ergänzen).
-- Satzzeichen, Satzstruktur und alle nicht gelisteten Wörter bleiben exakt wie im Original.
-- Wenn für ein Wort kein einfacheres Synonym existiert, lass es unverändert -- ersetze es NICHT durch eine Umschreibung oder Erklärung.
-- Die Wortanzahl der Ausgabe darf sich gegenüber dem Eingabetext um maximal 10% unterscheiden.
+        **Was du NICHT tun darfst:**
+        - Kein anderes Wort verändern, auch wenn es dir kompliziert erscheint. Nur die Wörter aus der Liste.
+        - Keine Sätze umformulieren, umstellen, kürzen oder verlängern.
+        - Keine Wörter in Anführungszeichen ersetzen.
+        
+        **Bedingungen:**
+        - Satzzeichen, Satzstruktur und alle nicht gelisteten Wörter bleiben exakt wie im Original.
+        - Wenn für ein Wort kein einfacheres Synonym existiert, lass es unverändert -- ersetze es NICHT durch eine Umschreibung oder Erklärung.
+        - Die Wortanzahl der Ausgabe darf sich gegenüber dem Eingabetext um maximal 10% unterscheiden.
 
-**Beispiel:**
-Wörterliste: [{{"word": "komplex"}}]
-Eingabetext: "Die Geburt ist ein komplexer Vorgang."
-Korrigierte Ausgabe: "Die Geburt ist ein schwieriger Vorgang."
-(Nur "komplex" wurde ersetzt. Alles andere blieb exakt gleich -- keine Umformulierung, keine Ergänzung.)
+        **Beispiel:**
+        Wörterliste: [{{"word": "äußerst"}}]
+        Eingabetext: "Das ist eine äußerst schwere Aufgabe."
+        Korrigierte Ausgabe: "Das ist eine sehr schwere Aufgabe."
+        (Nur "äußerst" wurde ersetzt. Alles andere blieb exakt gleich.)
 
-Wenn keines der gelisteten Wörter ein sinnvolles einfacheres Synonym hat, gib den Eingabetext EXAKT unverändert zurück.
+        Wenn keines der gelisteten Wörter ein sinnvolles einfacheres Synonym hat, gib den Eingabetext exakt und unverändert zurück.
+        Wenn die Liste leer ist. Gib den Eingabetext exakt zurück. 
 
-Wörterliste: {flagged_words}
-Eingabetext: {input_text}
+        Wörterliste: {flagged_words}
+        Eingabetext: {input_text}
 
-Gib ausschließlich den überarbeiteten Text zurück. Keine Einleitung, keine Erklärung, keine Anführungszeichen."""
+        **Gib ausschließlich den überarbeiteten Text zurück. Keine Einleitung, keine Erklärung, keine Anführungszeichen, keine Kommentare von dir. **
+        """
         return self._call_ollama(prompt, temperature=0.0)
 
     def fix_hallucination(self, original_source, input_text):
-        prompt = f"""Du bekommst einen ANSCHAULICHEN, EINFACH GESCHRIEBENEN Text (kurze Sätze, einfache Wörter) und ein Referenzdokument.
+        prompt = f"""
+        Du bekommst: 
+        -	einen einfach geschriebenen Text (kurze Sätze, einfache Wörter) 
+        -	ein Referenzdokument.
 
-**Deine einzige Aufgabe:** Prüfe den Text SATZ FÜR SATZ. Finde nur Sätze, die dem Referenzdokument WIDERSPRECHEN oder erkennbar erfundene/falsche Fakten enthalten (z. B. falsche Jahreszahlen, falsche Orte, falsche Namen, falsche Wortherkunft, falsche Eigenschaften von Personen/Tieren/Dingen). Korrigiere NUR diese Sätze, so knapp wie möglich.
+        **Deine einzige Aufgabe:** Prüfe den einfachen Text. Finde nur Sätze, die dem Referenzdokument widersprechen oder erkennbar erfundene/falsche Fakten enthalten (z. B. falsche Jahreszahlen, falsche Orte, falsche Namen, falsche Wortherkunft, falsche Eigenschaften von Personen/Tieren/Dingen). Korrigiere nur diese Sätze, so knapp wie möglich.
 
-**Was du NICHT tun darfst:**
-- Sätze, die bereits korrekt sind, NICHT umformulieren oder stilistisch "verbessern" -- übernimm sie WORT FÜR WORT unverändert.
-- Keine Sätze verlängern, keine Nebensätze, Erklärungen oder zusätzlichen Details einfügen -- auch nicht, wenn sie im Referenzdokument stehen.
-- Keine einfachen Wörter durch komplexere/fachlichere ersetzen (z. B. NICHT "Leute" durch "Bevölkerung" ersetzen).
-- Keine Sätze zusammenfassen, aufteilen oder umstellen.
-- Aussagen, die NICHT wörtlich im Referenzdokument stehen, aber auch nicht widersprüchlich oder erkennbar falsch sind (z. B. allgemein bekanntes Wissen), lässt du unverändert stehen -- das ist KEINE Halluzination, nur fehlende Quellenbelegung, und daher kein Grund zur Änderung.
-- Die Wortanzahl der Ausgabe darf sich gegenüber dem Eingabetext um maximal 10% unterscheiden.
+        **Was du NICHT tun darfst:**
+        - Sätze, die bereits korrekt sind umformulieren oder stilistisch ändern. Übernimm sie Wort für Wort unverändert.
+        - Keine Sätze verlängern, keine Nebensätze, Erklärungen oder zusätzlichen Details einfügen.
+        - Keine einfachen Wörter durch komplexere/fachlichere ersetzen.
+        - Keine Sätze zusammenfassen, aufteilen oder umstellen.
+        **Bedinungen:**
+        - Aussagen, die nicht wörtlich im Referenzdokument stehen, aber auch nicht widersprüchlich oder erkennbar falsch sind (z. B. allgemein bekanntes Wissen), lässt du unverändert stehen -- das ist KEINE Halluzination, nur fehlende Quellenbelegung, und daher kein Grund zur Änderung.
+        - Die Wortanzahl der Ausgabe darf sich gegenüber dem Eingabetext um maximal 10% unterscheiden.
+        - NIEMALS das Referenzdokument (auch nicht in Teilen oder nahezu wortwörtlich) als Ausgabe verwenden.
+        - Die Ausgabe muss immer im kurzen, einfachen Sprachstil des Eingabetexts bleiben. 
+        - Falls der Eingabetext so inhaltlich falsch ist, dass eine satzweise Korrektur nicht sinnvoll möglich ist: korrigiere so viele einzelne falsche Aussagen wie du sinnvoll kannst, aber erschaffe keinen neuen, komplexeren Text aus dem Referenzdokument.
 
-**Beispiel:**
-Referenzdokument: "Das Grundgesetz ist die Verfassung der Bundesrepublik Deutschland. Es trat 1949 in Kraft."
-Eingabetext: "Das Grundgesetz ist eine Verfassung von Deutschland. Man nennt es auch Bundesrepublik Österreich. Es trat 1949 in Kraft."
-Korrigierte Ausgabe: "Das Grundgesetz ist eine Verfassung von Deutschland. Es trat 1949 in Kraft."
-(Nur der falsche Satz über "Bundesrepublik Österreich" wurde entfernt. Die anderen Sätze blieben exakt gleich -- keine Umformulierung, keine Ergänzung.)
+        **Beispiel:**
+        Referenzdokument: „Albert Einstein wurde 1879 in Ulm geboren. Später lebte er unter anderem in der Schweiz und in den USA.“
+        Eingabetext: „Albert Einstein wurde in Ulm geboren. Er kam 1889 zur Welt. Später lebte er in der Schweiz und in den USA.“
+        Korrigierte Ausgabe: „Albert Einstein wurde in Ulm geboren. Er kam 1879 zur Welt. Später lebte er in der Schweiz und in den USA.“
+        (Nur die falsche Jahreszahl "1889" wurde durch „1879“ ersetzt. Die anderen Sätze blieben exakt gleich. Keine Umformulierung, keine Ergänzung.)
 
-Wenn der komplette Eingabetext schon korrekt ist, gib ihn EXAKT unverändert zurück.
+        Wenn der komplette Eingabetext schon korrekt ist, gib ihn exakt unverändert zurück.
 
-Referenzdokument: {original_source}
-Eingabetext: {input_text}
+        Referenzdokument: {original_source}
+        Eingabetext: {input_text}
 
-Gib ausschließlich den (ggf. korrigierten) Text zurück. Keine Einleitung, keine Erklärung, keine Anführungszeichen."""
+        **Gib ausschließlich den (gegeben falls) überarbeiteten Text zurück. Keine Einleitung, keine Erklärung, keine Anführungszeichen, keine Kommentare von dir. **
+        """
         return self._call_ollama(prompt, temperature=0.0)
 
     def fix_readability(self, input_text):
+        prompt = f"""Du bekommst: 
+        -	einen einfach geschriebenen Text, dessen Sätze für die Zielgruppe noch zu lang oder zu verschachtelt sind.
 
-        return self._call_ollama(promt, temperature=0.0)
+        **Deine einzige Aufgabe:** Teile lange oder verschachtelte Sätze in mehrere kurze, einfache Sätze auf, wo immer das sinnvoll möglich ist.
+
+        **Was du NICHT tun darfst:**
+        - Kein Wort durch ein anderes ersetzen. Die Wortwahl bleibt exakt wie im Original. Ausnahme: ein Bezugswort (z. B. ein wiederholtes Subjekt wie "Sie" oder "Das") darf beim Aufteilen eines Satzes wiederholt werden, das ist okay.
+        - Keine Informationen hinzufügen oder entfernen.
+        - Keine Sätze zusammenfassen, kürzen oder verdichten. Nur aufteilen, niemals das Gegenteil.
+
+        **Bedingungen**
+        - Sätze, die schon kurz und einfach sind, bleiben unverändert. Nicht jeder Satz muss geteilt werden.
+        - Die Reihenfolge der Informationen bleibt erhalten.
+        - Die Wortanzahl der Ausgabe darf sich gegenüber dem Eingabetext um maximal 15% unterscheiden
+
+        **Beispiel:**
+        Eingabetext: „Wenn Kinder regelmäßig Sport treiben, sind sie oft fitter und können sich beim Lernen besser konzentrieren.“
+        Aufgeteilte Ausgabe: „Manche Kinder treiben regelmäßig Sport. Sie sind oft fitter. Sie können sich beim Lernen besser konzentrieren.“
+        (Ein langer Satz mit zwei Nebenbedingungen wurde in drei kurze Sätze aufgeteilt. Kein Wort wurde ersetzt, keine Information ging verloren oder kam hinzu.)
+
+        Wenn der Text schon durchgehend aus kurzen, einfachen Sätzen besteht, gib ihn exakt unverändert zurück.
+
+        Eingabetext: {input_text}
+
+        **Gib ausschließlich den (gegeben falls) überarbeiteten Text zurück. Keine Einleitung, keine Erklärung, keine Anführungszeichen, keine Kommentare von dir. **
+
+        """
+        return self._call_ollama(prompt, temperature=0.0)
 
     @staticmethod
     def _call_ollama(prompt, temperature=0.2, force_json=False):
@@ -234,46 +280,56 @@ Gib ausschließlich den (ggf. korrigierten) Text zurück. Keine Einleitung, kein
         steps.append({"step": "1", "name": "mt5_simplification", "input": source_text, "output": simplified})
 
         content_fixed = self.fix_hallucination(source_text, simplified)
+
+        for i in range(2):
+            if(self.may_be_reference(content_fixed, source_text, simplified)):
+                simplified = self.simplify(source_text, control_level=age_specs["control_level"])
+                content_fixed = self.fix_hallucination(source_text, simplified)
+
         steps.append({"step": "2", "name": "fix_hallucination", "input": simplified, "raw_llm_response": content_fixed})
 
         flagged_words = self.find_difficult_words(content_fixed, age_specs["aoa_threshold"])
         steps.append({"step": "3", "name": "find_difficult_words", "output": flagged_words})
 
-
         if flagged_words:
             words_fixed = self.fix_words(content_fixed, flagged_words)
-            steps.append({"step": "5", "name": "fix_words", "input": content_fixed, "flagged_words_addressed": flagged_words,
+            steps.append({"step": "4", "name": "fix_words", "input": content_fixed, "flagged_words_addressed": flagged_words,
                         "output": words_fixed})
         else:
             words_fixed = content_fixed
-            steps.append({"step": "5", "name": "SKIPPED: fix_words"})
-        
+            steps.append({"step": "4", "name": "SKIPPED: fix_words"})
+
         readability = self.compute_readability(words_fixed, age_specs["wstf_threshold"], age_specs["lix_threshold"])
+        steps.append({"step": "5", "name": "compute_readability", "output": readability})
 
         if readability["wstf_too_high"] or readability["lix_too_high"]:
             final_text = self.fix_readability(words_fixed)
-            steps.append({"step": "4", "name": "compute_readability", "output": readability})
+            steps.append({"step": "6", "name": "fix_readability", "input": words_fixed, "output": final_text})
         else:
             final_text = words_fixed
-            steps.append({"step": "4", "name": "compute_readability", "output": readability})
+            steps.append({"step": "6", "name": "SKIPPED: fix_readability"})
 
         final_flagged_words = self.find_difficult_words(final_text, age_specs["aoa_threshold"])
         final_readability = self.compute_readability(final_text, age_specs["wstf_threshold"], age_specs["lix_threshold"])
-        steps.append({"step": "6", "name": "analyze_final_text", "input": final_text})
+        steps.append({"step": "7", "name": "analyze_final_text", "input": final_text})
 
         return {
-            "source": source_text, "age_group": age_group, "final_text": final_text,
+            #delete comments for debugging
+            #"source": source_text, 
+            #"age_group": age_group, 
+            "final_text": final_text,
             "mt5_simplification": simplified,
-            "content_fixed": content_fixed,
-            "flagged_words": flagged_words, "readability": readability,
-            "final_flagged_words": final_flagged_words, "final_readability": final_readability,
-            "steps": steps
+            #"content_fixed": content_fixed,
+            #"words_fixed": words_fixed,
+            #"flagged_words": flagged_words, "readability": readability,
+            #"final_flagged_words": final_flagged_words, "final_readability": final_readability,
+            #"steps": steps
         }
 
 
 if __name__ == "__main__":
     pipeline = SimplificationPipeline()
-    example_text = ""
+    example_text = 'Dass ausgerechnet jenes Werkzeug, mit dem auf die Schönheit deutschsprachiger Literatur hingewiesen werden soll, in fragwürdigem Deutsch "Longlist" genannt wird - darüber regt sich längst keiner mehr auf. Entsprechende Mäkeleien aus der Anfangszeit des Deutschen Buchpreises vor über 20 Jahren sind inzwischen verstummt. Der Preis und seine Listen - die "Longlist" im August mit 20 Titeln und die auf sechs Romane verkürzte "Shortlist" im September - sind etabliert und feste Größen im Kalender des Literaturbetriebs.Ärger, Empörung und Polemik lösen sie trotzdem regelmäßig und zuverlässig aus - und erfüllen damit zielgenau den Zweck des Deutschen Buchpreises. Denn Streit schafft Aufmerksamkeit - die wichtigste Währung auf dem hart umkämpften Buchmarkt, auf dem immer mehr Titel um die Gunst eines stetig kleiner werdenden Publikums ringen.'
     for age_group in AGE_GROUPS:
         result = pipeline.run(example_text, age_group=age_group)
         with open(f"pipeline_output_{age_group}.json", "w", encoding="utf-8") as f:
