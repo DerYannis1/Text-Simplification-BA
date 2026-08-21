@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 #MODEL_DIR = "./mt5-simplify-de"
 MODEL_DIR = "./mt5-sweep/run03_lr0.0003_nte30_lsf0.1"
 
-AOA_FILE = "./lexical_ressources/GPT_estimates_AoA.xlsx" # Korrelation von 0.96 zu den alten Werten
+AOA_FILE = "./lexical_ressources/GPT_estimates_AoA.xlsx" # Korrelation von 0.96 zu den menschlich erhobenen Werten
 #AOA_FILE = "./lexical_ressources/Age_Of_Acquisition.csv"
 FREQ_FILE = "./lexical_ressources/grundwortschatz.csv"
 SPACY_MODEL = "de_core_news_md"
@@ -28,30 +28,40 @@ FREQ_THRESHOLD = 5.0
 AGE_GROUPS = {
     "1": {
         "control_level": "MINIKLEXIKON",
-        "aoa_threshold": 7.0,
+        "aoa_threshold": 7.5,
         "wstf_threshold": 5.0,
         "lix_threshold": 35.0,
+        "min_length_ratio": 0.25
     },
     "2": {
         "control_level": "KLEXIKON",
-        "aoa_threshold": 9.0,
+        "aoa_threshold": 10.0,
         "wstf_threshold": 6.0,
         "lix_threshold": 39.0,
+        "min_length_ratio": 0.3
     },
     "3": {
         "control_level": "KLEXIKON",
-        "aoa_threshold": 10.5,
+        "aoa_threshold": 12.0,
         "wstf_threshold": 7.5,
         "lix_threshold": 45.0,
+        "min_length_ratio": 0.35
     },
 }
 
 GENERATION_MAX_NEW_TOKENS = 512
-GENERATION_MIN_LENGTH = 32
+GENERATION_MIN_LENGTH_FLOOR = 8
+GENERATION_MIN_LENGTH_CEILING = 256
 GENERATION_NUM_BEAMS = 6
 GENERATION_NO_REPEAT_NGRAM_SIZE = 3
 GENERATION_REPETITION_PENALTY = 1.15
-MAX_SOURCE_LENGTH = 1024  # muss zu --max-source-length aus train_mt5.py passen
+MAX_SOURCE_LENGTH = 1024
+MAX_HALLUCINATION_FIX_ITERATIONS = 3
+
+NO_ERROR = (
+    "kein fehler", "ist korrekt", "korrekte aussage", "nicht falsch",
+    "keine fehler", "an sich nicht falsch",
+)
 
 textstat.set_lang("de")
 
@@ -65,23 +75,14 @@ class SimplificationPipeline:
         self.model.eval()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model.to(self.device)
-        # agg="min" fuer AoA (frueher erworbene Lesart gewinnt bei Gross-/
-        # Kleinschreibungs-Konflikten), agg="max" fuer Frequenz (haeufigere
-        # Lesart gewinnt) -- siehe Docstring von _load_lexical_resource.
-        self.aoa_lookup = self._load_lexical_resource(AOA_FILE, "Word", "GPT_AoA_ft", agg="min")
-        self.freq_lookup = self._load_lexical_resource(FREQ_FILE, "Lemma", "Relative Frequenz", agg="max")
+        self.aoa_lookup = self._load_lexical_resource(AOA_FILE, "Word", "aoa_ft", agg="min")
+        #self.freq_lookup = self._load_lexical_resource(FREQ_FILE, "Lemma", "Relative Frequenz", agg="max") #hat nut probleme gemacht
         self.language_analyzer = spacy.load(SPACY_MODEL)
 
     _ALPHA_ONLY_RE = re.compile(r"^[A-Za-zÄÖÜäöüß\-]+$")
 
     @staticmethod
     def _split_multiword_entries(df, word_col):
-        """Manche Grundwortschatz-Zeilen fassen mehrere Lemmata mit einer
-        gemeinsamen Frequenz zusammen (z.B. 'der, die, das' als ein Eintrag
-        mit Rang 7). Dadurch waeren die Einzelwoerter 'der'/'die'/'das' -- 
-        einige der haeufigsten Woerter ueberhaupt -- im Lookup faktisch nie
-        auffindbar, weil find_difficult_words() immer Einzelwoerter extrahiert.
-        Solche Zeilen werden hier aufgespalten; jedes Teilwort erbt denselben Wert."""
         if df[word_col].astype(str).str.contains(",").any():
             df = df.copy()
             df[word_col] = df[word_col].astype(str).str.split(",")
@@ -110,39 +111,46 @@ class SimplificationPipeline:
         grouped = df.groupby("_key")[value_col].max() if agg == "max" else df.groupby("_key")[value_col].min()
         return grouped.astype(float).to_dict()
 
-    def simplify(self, text, control_level, max_new_tokens=GENERATION_MAX_NEW_TOKENS):
+    @staticmethod
+    def _compute_min_length(input_token_count, min_length_ratio):
+        target = int(round(input_token_count * min_length_ratio))
+        return max(GENERATION_MIN_LENGTH_FLOOR, min(target, GENERATION_MIN_LENGTH_CEILING))
+
+    def simplify(self, text, control_level, min_length_ratio, max_new_tokens=GENERATION_MAX_NEW_TOKENS):
         input_text = f"vereinfache <{control_level.upper()}>: {text}"
         inputs = self.tokenizer(
             input_text, return_tensors="pt", max_length=MAX_SOURCE_LENGTH, truncation=True
         ).to(self.device)
+        min_length = self._compute_min_length(inputs["input_ids"].shape[1], min_length_ratio)
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                min_length=GENERATION_MIN_LENGTH,
+                min_length=min_length,
                 num_beams=GENERATION_NUM_BEAMS,
                 no_repeat_ngram_size=GENERATION_NO_REPEAT_NGRAM_SIZE,
                 repetition_penalty=GENERATION_REPETITION_PENALTY,
             )
         return self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
+    _CONTENT_POS = {"NOUN", "VERB", "ADJ", "ADV"} #Wortarten die als schwer geflagged werden können
+
     def find_difficult_words(self, text, aoa_threshold):
-        words = re.findall(r"[A-Za-zÄÖÜäöüß]+", text) #Alle Wörter die mit Buchstaben aus dem Alphabet und ä, ö, ü, ß bestehen
+        doc = self.language_analyzer(text)
         flagged, seen = [], set()
-        for w in words:
-            key = w.lower()
+        for token in doc:
+            if not token.is_alpha or token.pos_ not in self._CONTENT_POS:
+                continue
+            key = token.text.lower()
             if key in seen:
                 continue
             seen.add(key)
             aoa = self.aoa_lookup.get(key)
-            freq = self.freq_lookup.get(key)
             reasons = []
             if aoa is not None and aoa > aoa_threshold:
                 reasons.append(f"AoA={aoa}")
-            if freq is not None and freq < FREQ_THRESHOLD:
-                reasons.append(f"Frequenz={freq:.2f}")
             if reasons:
-                flagged.append({"word": w, "reasons": reasons})
+                flagged.append({"word": token.text, "reasons": reasons})
         return flagged
 
     def compute_readability(self, text, wstf_threshold, lix_threshold):
@@ -160,73 +168,165 @@ class SimplificationPipeline:
         return reference_sim > unwanted_similarity or len_output_input > 1.5
 
     def fix_words(self, input_text, flagged_words):
+        words_only = [w["word"] for w in flagged_words]
+        prompt = f"""
+        Du bekommst einen Text und eine Liste schwieriger Wörter daraus.
+
+        **Deine einzige Aufgabe:** Finde für jedes Wort ein einfacheres, allgemein bekanntes Synonym,
+        das im Kontext des Satzes passt. Wenn kein sinnvolles einfacheres Synonym existiert oder das schwierige Wort ein Eigenname ist, 
+        gib als Ersatz exakt das Originalwort zurück (keine Umschreibung, keine Erklärung).
+
+        Gib AUSSCHLIESSLICH ein JSON-Objekt zurück, keine Einleitung, kein Markdown:
+        {{"replacements": [{{"word": "<Originalwort>", "replacement": "<einfacheres Wort oder Originalwort>"}}]}}
+
+        Wörterliste: {words_only}
+        Text (nur als Kontext, NICHT zurückgeben): {input_text}
+        """
+        raw = self._call_ollama(prompt, temperature=0.0, force_json=True)
+
+        try:
+            parsed = json.loads(raw)
+            replacements = parsed.get("replacements", [])
+        except (json.JSONDecodeError, AttributeError):
+            replacements = []
+
+        result = input_text
+        for r in replacements:
+            word = r.get("word", "")
+            replacement = r.get("replacement", "")
+            if not word or not replacement or word == replacement:
+                continue
+            pattern = re.compile(r"(?<!-)\b" + re.escape(word) + r"\b(?!-)")
+            result = pattern.sub(lambda m: self._match_case(replacement, m.group()), result)
+
+        return result
+
+    @staticmethod
+    def _match_case(replacement, original_match):
+        if original_match.isupper():
+            return replacement.upper()
+        if original_match[0].isupper():
+            return replacement[0].upper() + replacement[1:]
+        return replacement
+
+    def detect_hallucinations(self, original_source, input_text):
         prompt = f"""
         Du bekommst:
-        - einen einfach geschriebenen Text (kurze Sätze, einfache Wörter) 
-        - eine Liste von Wörtern, die durch einfachere Synonyme ersetzt werden sollen.
+        - ein Referenzdokument
+        - einen einfach geschriebenen Text, der auf dem Referenzdokument basieren soll.
 
-        **Deine einzige Aufgabe:** Ersetze genau die Wörter aus der Liste durch ein einfacheres, allgemein bekanntes und passendes Synonym. Wort für Wort, an derselben Stelle im Satz.
+        **Deine einzige Aufgabe:** Finde Sätze im einfachen Text, die einen der folgenden Fehler enthalten:
 
-        **Was du NICHT tun darfst:**
-        - Kein anderes Wort verändern, auch wenn es dir kompliziert erscheint. Nur die Wörter aus der Liste.
-        - Keine Sätze umformulieren, umstellen, kürzen oder verlängern.
-        - Keine Wörter in Anführungszeichen ersetzen.
-        
-        **Bedingungen:**
-        - Satzzeichen, Satzstruktur und alle nicht gelisteten Wörter bleiben exakt wie im Original.
-        - Wenn für ein Wort kein einfacheres Synonym existiert, lass es unverändert -- ersetze es NICHT durch eine Umschreibung oder Erklärung.
-        - Die Wortanzahl der Ausgabe darf sich gegenüber dem Eingabetext um maximal 10% unterscheiden.
+        1. Widersprüche zum Referenzdokument oder erkennbar erfundene/falsche Fakten
+        (z. B. falsche Jahreszahlen, falsche Orte, falsche Namen, falsche Wortherkunft,
+        falsche Eigenschaften von Personen/Tieren/Dingen, falsch gesetzte oder fehlende
+        Verneinungen, vertauschte/umgekehrte Aussagen).
 
-        **Beispiel:**
-        Wörterliste: [{{"word": "äußerst"}}]
-        Eingabetext: "Das ist eine äußerst schwere Aufgabe."
-        Korrigierte Ausgabe: "Das ist eine sehr schwere Aufgabe."
-        (Nur "äußerst" wurde ersetzt. Alles andere blieb exakt gleich.)
+        2. Unsinnige oder unlogische Aussagen: Sätze, die in sich widersprüchlich sind, keinen
+        erkennbaren Sinn ergeben oder inhaltsleere Füllsätze ohne Bezug zum
+        eigentlichen Thema sind.
 
-        Wenn keines der gelisteten Wörter ein sinnvolles einfacheres Synonym hat, gib den Eingabetext exakt und unverändert zurück.
-        Wenn die Liste leer ist. Gib den Eingabetext exakt zurück. 
+        3. Sachlich falsche Vergleiche oder Analogien: Sätze, die eine Größe, ein Gewicht,
+        eine Menge oder Ähnliches mit etwas Alltäglichem vergleichen (z. B. "so schwer wie ein kleines Auto",
+        "so groß wie ein Fußballfeld"), bei denen der Vergleichsgegenstand sachlich nicht zutrifft.
+        WICHTIG: Solche Vergleiche sind als Stilmittel erwünscht und sollen NICHT als grundsätzlicher
+        Fehler gelten -- melde hier ausschließlich Sätze, bei denen der gewählte Vergleichsgegenstand
+        falsch oder unpassend ist. Gib in der Begründung (reason) explizit an, dass nur der
+        Vergleichsgegenstand ausgetauscht werden soll, nicht der ganze Satz.
 
-        Wörterliste: {flagged_words}
-        Eingabetext: {input_text}
+        Aussagen, die nicht wörtlich im Referenzdokument stehen, aber auch nicht widersprüchlich,
+        unlogisch oder erkennbar falsch sind (allgemein bekanntes, sachlich korrektes Wissen),
+        zählen nicht als Fehler. Melde nur Sätze mit einem der drei oben genannten Fehler.
 
-        **Gib ausschließlich den überarbeiteten Text zurück. Keine Einleitung, keine Erklärung, keine Anführungszeichen, keine Kommentare von dir. **
-        """
-        return self._call_ollama(prompt, temperature=0.0)
-
-    def fix_hallucination(self, original_source, input_text):
-        prompt = f"""
-        Du bekommst: 
-        -	einen einfach geschriebenen Text (kurze Sätze, einfache Wörter) 
-        -	ein Referenzdokument.
-
-        **Deine einzige Aufgabe:** Prüfe den einfachen Text. Finde nur Sätze, die dem Referenzdokument widersprechen oder erkennbar erfundene/falsche Fakten enthalten (z. B. falsche Jahreszahlen, falsche Orte, falsche Namen, falsche Wortherkunft, falsche Eigenschaften von Personen/Tieren/Dingen). Korrigiere nur diese Sätze, so knapp wie möglich.
-
-        **Was du NICHT tun darfst:**
-        - Sätze, die bereits korrekt sind umformulieren oder stilistisch ändern. Übernimm sie Wort für Wort unverändert.
-        - Keine Sätze verlängern, keine Nebensätze, Erklärungen oder zusätzlichen Details einfügen.
-        - Keine einfachen Wörter durch komplexere/fachlichere ersetzen.
-        - Keine Sätze zusammenfassen, aufteilen oder umstellen.
-        **Bedinungen:**
-        - Aussagen, die nicht wörtlich im Referenzdokument stehen, aber auch nicht widersprüchlich oder erkennbar falsch sind (z. B. allgemein bekanntes Wissen), lässt du unverändert stehen -- das ist KEINE Halluzination, nur fehlende Quellenbelegung, und daher kein Grund zur Änderung.
-        - Die Wortanzahl der Ausgabe darf sich gegenüber dem Eingabetext um maximal 10% unterscheiden.
-        - NIEMALS das Referenzdokument (auch nicht in Teilen oder nahezu wortwörtlich) als Ausgabe verwenden.
-        - Die Ausgabe muss immer im kurzen, einfachen Sprachstil des Eingabetexts bleiben. 
-        - Falls der Eingabetext so inhaltlich falsch ist, dass eine satzweise Korrektur nicht sinnvoll möglich ist: korrigiere so viele einzelne falsche Aussagen wie du sinnvoll kannst, aber erschaffe keinen neuen, komplexeren Text aus dem Referenzdokument.
-
-        **Beispiel:**
-        Referenzdokument: „Albert Einstein wurde 1879 in Ulm geboren. Später lebte er unter anderem in der Schweiz und in den USA.“
-        Eingabetext: „Albert Einstein wurde in Ulm geboren. Er kam 1889 zur Welt. Später lebte er in der Schweiz und in den USA.“
-        Korrigierte Ausgabe: „Albert Einstein wurde in Ulm geboren. Er kam 1879 zur Welt. Später lebte er in der Schweiz und in den USA.“
-        (Nur die falsche Jahreszahl "1889" wurde durch „1879“ ersetzt. Die anderen Sätze blieben exakt gleich. Keine Umformulierung, keine Ergänzung.)
-
-        Wenn der komplette Eingabetext schon korrekt ist, gib ihn exakt unverändert zurück.
+        Gib ausschliesslich ein JSON-Objekt zurück, keine Einleitung, keine Erklärung, kein Markdown:
+        {{"has_errors": true/false, "errors": [{{"sentence": "<exakter fehlerhafter Satz>", "reason": "<kurze Begründung>"}}]}}
 
         Referenzdokument: {original_source}
-        Eingabetext: {input_text}
-
-        **Gib ausschließlich den (gegeben falls) überarbeiteten Text zurück. Keine Einleitung, keine Erklärung, keine Anführungszeichen, keine Kommentare von dir. **
+        Einfacher Text: {input_text}
         """
-        return self._call_ollama(prompt, temperature=0.0)
+        raw = self._call_ollama(prompt, temperature=0.0, force_json=True)
+        try:
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict) or "errors" not in parsed:
+                raise ValueError
+        except (json.JSONDecodeError, ValueError):
+            parsed = {"has_errors": False, "errors": []}
+        return parsed
+
+    def correct_hallucinations(self, original_source, input_text, errors):
+        error_list_str = "\n".join(
+            f'- Satz: "{e}" -> Problem: (nicht spezifiziert)' if isinstance(e, str)
+            else f'- Satz: "{e.get("sentence", "")}" -> Problem: {e.get("reason", "")}'
+            for e in errors
+        )
+        prompt = f"""
+        Du bekommst ein Referenzdokument und eine Liste fehlerhafter Sätze aus einem einfachen Text,
+        mit Begründung.
+
+        **Deine einzige Aufgabe:** Korrigiere jeden gelisteten Satz anhand des Referenzdokuments, so knapp
+        wie möglich, im gleichen kurzen, einfachen Sprachstil. Keine zusätzlichen Details, keine
+        Zusammenfassungen, keine Umstellungen.
+
+        **Besonderheit bei Vergleichen/Analogien** (z. B. "so schwer wie ein Auto", "so groß wie ein
+        Fußballfeld"): Wenn das Problem ein falscher Vergleichsgegenstand ist, LÖSCHE NIEMALS den
+        ganzen Vergleich. Ersetze stattdessen nur den Vergleichsgegenstand durch einen sachlich
+        passenden, alltagsnahen Gegenstand mit ungefähr der richtigen Größe/dem richtigen Gewicht,
+        und behalte die restliche Satzstruktur bei. Beispiel: "Das wiegt so viel wie ein Auto" bei
+        einem tatsächlichen Gewicht von 3 kg -> "Das wiegt so viel wie ein Backstein" (nicht ersatzlos
+        streichen).
+
+        Gib AUSSCHLIESSLICH ein JSON-Objekt zurück, keine Einleitung, kein Markdown:
+        {{"corrections": [{{"original": "<exakter fehlerhafter Satz aus dem Text>", "corrected": "<korrigierter Satz>"}}]}}
+
+        Fehlerhafte Sätze:
+        {error_list_str}
+
+        Referenzdokument: {original_source}
+        """
+        raw = self._call_ollama(prompt, temperature=0.0, force_json=True)
+
+        try:
+            parsed = json.loads(raw)
+            corrections = parsed.get("corrections", [])
+        except (json.JSONDecodeError, AttributeError):
+            corrections = []
+
+        result = input_text
+        for c in corrections:
+            original = c.get("original", "")
+            corrected = c.get("corrected", "")
+            if not original or not corrected or len(corrected.split()) < 3:
+                continue
+            if original in result:
+                result = result.replace(original, corrected, 1)
+                continue
+            sentences = re.split(r"(?<=[.!?])\s+", result)
+            best = max(sentences, key=lambda s: SequenceMatcher(None, s, original).ratio(), default=None)
+            if best and SequenceMatcher(None, best, original).ratio() > 0.75:
+                result = result.replace(best, corrected, 1)
+        return result
+
+
+    def _is_real_error(self, error):
+        if isinstance(error, str):
+            reason = error.lower()
+        else:
+            reason = (error.get("reason") or "").lower()
+        if not reason:
+            return False  # ohne Begründung nicht korrigieren
+        return not any(marker in reason for marker in NO_ERROR)
+
+    def fix_hallucination(self, original_source, input_text, max_iterations=MAX_HALLUCINATION_FIX_ITERATIONS):
+        current_text = input_text
+        all_detected_errors = []
+        for _ in range(max_iterations):
+            detection = self.detect_hallucinations(original_source, current_text)
+            errors = [e for e in detection.get("errors", []) if self._is_real_error(e)]
+            if not errors:
+                break
+            all_detected_errors.extend(errors)
+            current_text = self.correct_hallucinations(original_source, current_text, errors)
+        return current_text, all_detected_errors
 
     def fix_readability(self, input_text):
         prompt = f"""Du bekommst: 
@@ -269,6 +369,18 @@ class SimplificationPipeline:
         response = requests.post(OLLAMA_URL, json=payload, timeout=300)
         response.raise_for_status()
         return response.json()["response"].strip()
+    
+    def _cleanup_text(self, text):
+        text = re.sub(r"\s*\.\s*\.", ".", text)         # verwaiste Punkte
+        text = re.sub(r"\s+([.,!?;:])", r"\1", text)    # Leerzeichen vor Punkt, etc.
+        text = re.sub(r"[ \t]{2,}", " ", text).strip()  #Mehrere Leerzeichen zu einem zusammenfassen
+        sentences = re.split(r"(?<=[.!?])\s+", text)    #Satzerlennung
+        kept = []
+        for s in sentences:
+            if any(SequenceMatcher(None, s.lower(), k.lower()).ratio() > 0.85 for k in kept):
+                continue
+            kept.append(s)
+        return " ".join(kept)
 
     def run(self, source_text, age_group="1", max_content_fix_iterations=2):
         if age_group not in AGE_GROUPS:
@@ -276,15 +388,15 @@ class SimplificationPipeline:
         age_specs = AGE_GROUPS[age_group]
         steps = []
 
-        simplified = self.simplify(source_text, control_level=age_specs["control_level"])
+        simplified = self.simplify(source_text, control_level=age_specs["control_level"], min_length_ratio=age_specs["min_length_ratio"])
         steps.append({"step": "1", "name": "mt5_simplification", "input": source_text, "output": simplified})
 
-        content_fixed = self.fix_hallucination(source_text, simplified)
+        content_fixed, detected_hallucinations = self.fix_hallucination(source_text, simplified)
 
         for i in range(2):
             if(self.may_be_reference(content_fixed, source_text, simplified)):
-                simplified = self.simplify(source_text, control_level=age_specs["control_level"])
-                content_fixed = self.fix_hallucination(source_text, simplified)
+                simplified = self.simplify(source_text, control_level=age_specs["control_level"], min_length_ratio=age_specs["min_length_ratio"])
+                content_fixed, detected_hallucinations = self.fix_hallucination(source_text, simplified)
 
         steps.append({"step": "2", "name": "fix_hallucination", "input": simplified, "raw_llm_response": content_fixed})
 
@@ -308,6 +420,8 @@ class SimplificationPipeline:
         else:
             final_text = words_fixed
             steps.append({"step": "6", "name": "SKIPPED: fix_readability"})
+        
+        final_text = self._cleanup_text(final_text)
 
         final_flagged_words = self.find_difficult_words(final_text, age_specs["aoa_threshold"])
         final_readability = self.compute_readability(final_text, age_specs["wstf_threshold"], age_specs["lix_threshold"])
@@ -318,10 +432,11 @@ class SimplificationPipeline:
             #"source": source_text, 
             #"age_group": age_group, 
             "final_text": final_text,
-            "mt5_simplification": simplified,
+            #"mt5_simplification": simplified,
             #"content_fixed": content_fixed,
             #"words_fixed": words_fixed,
             #"flagged_words": flagged_words, "readability": readability,
+            #"detected_hallucinations": detected_hallucinations,
             #"final_flagged_words": final_flagged_words, "final_readability": final_readability,
             #"steps": steps
         }
