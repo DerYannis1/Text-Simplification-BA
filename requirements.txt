@@ -1,0 +1,10 @@
+datasets
+transformers
+tiktoken
+torch
+sentencepiece
+peft
+evaluate
+sacrebleu
+sacremoses
+tensorboard
