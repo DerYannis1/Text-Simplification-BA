@@ -10,7 +10,7 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from difflib import SequenceMatcher
 
 #MODEL_DIR = "./mt5-simplify-de"
-MODEL_DIR = "./mt5-sweep/run03_lr0.0003_nte30_lsf0.1"
+MODEL_DIR = "./mt5_hyperparameter_tuning/run03_lr0.0003_nte30_lsf0.1"
 
 AOA_FILE = "./lexical_ressources/GPT_estimates_AoA.xlsx" # Korrelation von 0.96 zu den menschlich erhobenen Werten
 #AOA_FILE = "./lexical_ressources/Age_Of_Acquisition.csv"
