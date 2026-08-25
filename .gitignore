@@ -2,3 +2,7 @@
 mbart-lora-TS
 mbart-tuned-final
 dataset
+/not_in_git
+/dataset_mt5/*.jsonl
+/mt5_hyperparameter_tuning
+__pycache__
