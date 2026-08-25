@@ -8,6 +8,9 @@ Avg. Satzlaenge Miniklexikon (Woerter/Satz): 8.77
 Avg. Satzlaenge Klexikon (Woerter/Satz): 11.27
 Avg. Wortlaenge Wikipedia (Zeichen/Wort): 6.22
 Avg. Wortlaenge Miniklexikon (Zeichen/Wort): 4.92
-Avg. Wortlaenge Miniklexikon (Zeichen/Wort): 5.26
+Avg. Wortlaenge Klexikon (Zeichen/Wort): 5.26
+Avg. AoA Wikipedia: 6.64
+Avg. AoA Miniklexikon: 4.88
+Avg. AoA Klexikon: 5.34
 Avg. Kompressionsrate (Miniklexikon/Input): 0.138
 Avg. Kompressionsrate (Klexikon/Input): 0.168
