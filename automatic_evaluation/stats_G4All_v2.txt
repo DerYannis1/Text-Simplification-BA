@@ -1,0 +1,50 @@
+Anzahl Artikel: 15
+
+--- Wikipedia (Source) ---
+Avg. Woerter pro Text: 141.00
+Avg. Satzlaenge (Woerter/Satz): 16.65
+Avg. Wortlaenge (Zeichen/Wort): 6.01
+Avg. AoA: 6.28
+Avg. WSTF: 10.43
+Avg. LIX: 52.51
+Avg. Flesch-Amstad: 44.99
+
+--- Altersgruppe 5-8 Jahre (Target) ---
+Avg. Woerter pro Text: 44.93
+Avg. Satzlaenge (Woerter/Satz): 7.02
+Avg. Wortlaenge (Zeichen/Wort): 4.80
+Avg. AoA: 4.43
+Avg. WSTF: 2.88
+Avg. LIX: 24.93
+Avg. Flesch-Amstad: 81.05
+BERTScore F1 (5-8 vs. Wikipedia): 0.6994
+Avg. Kompressionsrate (5-8/Wikipedia): 0.351
+
+Avg. ROUGE-L (5-8 vs. Wikipedia): 0.1797
+
+--- Altersgruppe 8-11 Jahre (Target) ---
+Avg. Woerter pro Text: 60.20
+Avg. Satzlaenge (Woerter/Satz): 9.61
+Avg. Wortlaenge (Zeichen/Wort): 5.21
+Avg. AoA: 5.35
+Avg. WSTF: 5.76
+Avg. LIX: 35.10
+Avg. Flesch-Amstad: 69.31
+BERTScore F1 (8-11 vs. Wikipedia): 0.7659
+Avg. Kompressionsrate (8-11/Wikipedia): 0.461
+
+Avg. ROUGE-L (8-11 vs. Wikipedia): 0.3388
+
+--- Altersgruppe 11-14 Jahre (Target) ---
+Avg. Woerter pro Text: 68.13
+Avg. Satzlaenge (Woerter/Satz): 12.78
+Avg. Wortlaenge (Zeichen/Wort): 5.84
+Avg. AoA: 6.29
+Avg. WSTF: 9.07
+Avg. LIX: 47.17
+Avg. Flesch-Amstad: 52.18
+BERTScore F1 (11-14 vs. Wikipedia): 0.8031
+Avg. Kompressionsrate (11-14/Wikipedia): 0.515
+
+Avg. ROUGE-L (11-14 vs. Wikipedia): 0.4363
+

@@ -1,0 +1,29 @@
+Anzahl Artikel: 15
+
+--- Altersgruppe 5-8 Jahre ---
+Avg. Woerter pro Text: 44.93
+Avg. Satzlaenge (Woerter/Satz): 7.02
+Avg. Wortlaenge (Zeichen/Wort): 4.80
+Avg. AoA: 4.43
+Avg. WSTF: 2.88
+Avg. LIX: 24.93
+Avg. Flesch-Amstad: 81.05
+
+--- Altersgruppe 8-11 Jahre ---
+Avg. Woerter pro Text: 60.20
+Avg. Satzlaenge (Woerter/Satz): 9.61
+Avg. Wortlaenge (Zeichen/Wort): 5.21
+Avg. AoA: 5.35
+Avg. WSTF: 5.76
+Avg. LIX: 35.10
+Avg. Flesch-Amstad: 69.31
+
+--- Altersgruppe 11-14 Jahre ---
+Avg. Woerter pro Text: 68.13
+Avg. Satzlaenge (Woerter/Satz): 12.78
+Avg. Wortlaenge (Zeichen/Wort): 5.84
+Avg. AoA: 6.29
+Avg. WSTF: 9.07
+Avg. LIX: 47.17
+Avg. Flesch-Amstad: 52.18
+

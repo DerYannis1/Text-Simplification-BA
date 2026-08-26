@@ -1,0 +1,11 @@
+Anzahl Artikel: 15
+
+Avg. Woerter pro Artikel: 141.00
+Avg. Satzlaenge (Woerter/Satz): 16.65
+Avg. Wortlaenge (Zeichen/Wort): 6.01
+
+Avg. AoA: 6.28
+
+Avg. WSTF: 10.43
+Avg. LIX: 52.51
+Avg. Flesch-Amstad: 44.99
