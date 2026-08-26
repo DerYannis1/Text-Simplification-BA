@@ -13,7 +13,7 @@ Willkommen im Repository zu der praktischen Implementierung meiner Bachelor-Arbe
 └── model/                    # Training, Hyperparameter-Tuning und finale Pipeline
 .gitignore
 README.md            
-requirements.txt              # Kein Anspruch auf Vollständigkeit, aber hilft zu Beginn
+requirements.txt              # Kein Anspruch auf Vollständigkeit, aber das meiste sollte enthalten sein
 ```
 
 ## Referenzen
