@@ -30,21 +30,21 @@ AGE_GROUPS = {
         "control_level": "MINIKLEXIKON",
         "aoa_threshold": 7.5,
         "wstf_threshold": 5.0,
-        "lix_threshold": 35.0,
+        "flesch_threshold": 65.0,
         "min_length_ratio": 0.25
     },
     "2": {
         "control_level": "KLEXIKON",
         "aoa_threshold": 10.0,
         "wstf_threshold": 6.0,
-        "lix_threshold": 39.0,
+        "flesch_threshold": 55.0,
         "min_length_ratio": 0.3
     },
     "3": {
         "control_level": "KLEXIKON",
         "aoa_threshold": 12.0,
         "wstf_threshold": 7.5,
-        "lix_threshold": 45.0,
+        "flesch_threshold": 45.0,
         "min_length_ratio": 0.35
     },
 }
@@ -153,13 +153,13 @@ class SimplificationPipeline:
                 flagged.append({"word": token.text, "reasons": reasons})
         return flagged
 
-    def compute_readability(self, text, wstf_threshold, lix_threshold):
+    def compute_readability(self, text, wstf_threshold, flesch_threshold):
         wstf = textstat.wiener_sachtextformel(text, variant=1)
-        lix = textstat.lix(text)
+        flesch_amstad = textstat.flesch_reading_ease(text)
         return {
-            "wstf": wstf, "lix": lix,
+            "wstf": wstf, "flesch_amstad": flesch_amstad,
             "wstf_too_high": bool(wstf > wstf_threshold),
-            "lix_too_high": bool(lix > lix_threshold),
+            "flesch_too_low": bool(flesch_amstad < flesch_threshold),
         }
 
     def may_be_reference(self, output, reference, input_text, unwanted_similarity=0.75):
@@ -411,10 +411,10 @@ class SimplificationPipeline:
             words_fixed = content_fixed
             steps.append({"step": "4", "name": "SKIPPED: fix_words"})
 
-        readability = self.compute_readability(words_fixed, age_specs["wstf_threshold"], age_specs["lix_threshold"])
+        readability = self.compute_readability(words_fixed, age_specs["wstf_threshold"], age_specs["flesch_threshold"])
         steps.append({"step": "5", "name": "compute_readability", "output": readability})
 
-        if readability["wstf_too_high"] or readability["lix_too_high"]:
+        if readability["wstf_too_high"] or readability["flesch_too_low"]:
             final_text = self.fix_readability(words_fixed)
             steps.append({"step": "6", "name": "fix_readability", "input": words_fixed, "output": final_text})
         else:
@@ -424,7 +424,7 @@ class SimplificationPipeline:
         final_text = self._cleanup_text(final_text)
 
         final_flagged_words = self.find_difficult_words(final_text, age_specs["aoa_threshold"])
-        final_readability = self.compute_readability(final_text, age_specs["wstf_threshold"], age_specs["lix_threshold"])
+        final_readability = self.compute_readability(final_text, age_specs["wstf_threshold"], age_specs["flesch_threshold"])
         steps.append({"step": "7", "name": "analyze_final_text", "input": final_text})
 
         return {
@@ -432,7 +432,7 @@ class SimplificationPipeline:
             #"source": source_text, 
             #"age_group": age_group, 
             "final_text": final_text,
-            #"mt5_simplification": simplified,
+            "mt5_simplification": simplified,
             #"content_fixed": content_fixed,
             #"words_fixed": words_fixed,
             #"flagged_words": flagged_words, "readability": readability,
