@@ -8,3 +8,17 @@ evaluate
 sacrebleu
 sacremoses
 tensorboard
+requests
+beautifulsoup4
+wikipedia-api
+jsonl
+tqdm
+pandas
+numpy
+spacy
+textstat
+bert-score
+rouge-score
+
+# Für Chat-GPT API Call (Dafür braucht man auch einen Openai API Key)
+openai
