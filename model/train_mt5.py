@@ -17,8 +17,6 @@ from transformers import (
     set_seed,
 )
 
-from d_sari import d_sari_sent
-
 LEVEL_TOKENS = ["<KLEXIKON>", "<MINIKLEXIKON>"]
 
 scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=False)
@@ -77,16 +75,6 @@ def copy_rate(sources, preds):
     return copies / max(len(preds), 1)
 
 
-def d_sari_score(sources, preds, refs):
-    scores = []
-    for source, pred, reference in zip(sources, preds, refs):
-        if not source.strip() or not pred.strip() or not reference.strip():
-            continue
-        final_score, _, _, _ = d_sari_sent(source, pred, [reference])
-        scores.append(final_score)
-    return np.mean(scores) if scores else 0.0
-
-
 def compute_metrics_function(tokenizer):
     def compute_metrics(eval_pred):
         preds, labels = eval_pred.predictions, eval_pred.label_ids
@@ -108,7 +96,6 @@ def compute_metrics_function(tokenizer):
             decoded_inputs = tokenizer.batch_decode(inputs_arr, skip_special_tokens=True)
 
             metrics["copy_rate"] = copy_rate(decoded_inputs, decoded_preds)
-            metrics["d_sari"] = d_sari_score(decoded_inputs, decoded_preds, decoded_labels)
 
         return metrics
     return compute_metrics

@@ -31,15 +31,3 @@ Lange, Willi/Okamura, Saburo/Scharloth, Joachim (2016): Datengeleiteter Kernwort
 **Klexikon**
 
 Die Trainings-Daten stammen aus dem [Klexikon](https://klexikon.zum.de/wiki/Klexikon:%C3%9Cber_uns), einem Online-Lexikon für Kinder von 6-14 Jahren.
-
-**D-Sari**
-@misc{sun2021documentleveltextsimplificationdataset,
-      title={Document-Level Text Simplification: Dataset, Criteria and Baseline}, 
-      author={Renliang Sun and Hanqi Jin and Xiaojun Wan},
-      year={2021},
-      eprint={2110.05071},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2110.05071}, 
-}
-GitHub
